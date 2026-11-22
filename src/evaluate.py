@@ -20,7 +20,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import RESULTS_DIR
+from src.config import (
+    ACTIVE_MODELS,
+    ACTIVE_WRAPPERS,
+    FREE_MODELS,
+    PAID_MODELS,
+    RESULTS_DIR,
+)
 
 # Standard refusal pattern regex list (widely used in safety benchmarks)
 REFUSAL_PATTERNS = [
@@ -251,31 +257,55 @@ def calculate_group_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 def export_blind_qa_csv(
     records: List[Dict[str, Any]],
     output_path: Path,
-    max_rows: int = 30,
+    max_rows: int = 50,
     seed: int = 42,
 ) -> None:
     """Export blind QA audit CSV with shuffled rows and hidden automated labels.
     
-    Preserves existing human labels and notes if the file already exists.
+    Preserves all existing human labels and audited rows if the file already exists.
     """
-    existing_labels: Dict[Tuple[str, str, str], Tuple[str, str]] = {}
+    existing_rows: List[Dict[str, str]] = []
+    seen_keys: Set[Tuple[str, str, str]] = set()
+
     if output_path.exists():
         try:
             with open(output_path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
+                    existing_rows.append(row)
                     key = (str(row.get("prompt_id")), str(row.get("model")), str(row.get("wrapper")))
-                    h_val = row.get("human_label_blank", "")
-                    n_val = row.get("notes_blank", "")
-                    if h_val or n_val:
-                        existing_labels[key] = (h_val, n_val)
+                    seen_keys.add(key)
         except Exception:
             pass
 
-    shuffled = list(records)
+    # Collect new records not already present in the audit sheet
+    new_candidates = []
+    for r in records:
+        key = (str(r.get("prompt_id")), str(r.get("model")), str(r.get("wrapper")))
+        if key not in seen_keys:
+            new_candidates.append(r)
+
     rng = random.Random(seed)
-    rng.shuffle(shuffled)
-    subset = shuffled[:max_rows]
+    rng.shuffle(new_candidates)
+
+    remaining_slots = max(0, max_rows - len(existing_rows))
+    to_add = new_candidates[:remaining_slots]
+
+    # Combine existing rows (with human ratings preserved) and new rows
+    all_rows = list(existing_rows)
+    for r in to_add:
+        text = r.get("response_text") or r.get("content") or ""
+        clean_excerpt = " ".join(text.split())[:300]
+        all_rows.append({
+            "row_id": str(len(all_rows) + 1),
+            "prompt_id": str(r.get("prompt_id")),
+            "true_label": str(r.get("label")),
+            "model": str(r.get("model")),
+            "wrapper": str(r.get("wrapper")),
+            "response_excerpt": clean_excerpt,
+            "human_label_blank": "",
+            "notes_blank": "",
+        })
 
     with open(output_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -290,49 +320,126 @@ def export_blind_qa_csv(
             "notes_blank",
         ])
 
-        for idx, r in enumerate(subset, start=1):
-            text = r.get("response_text") or r.get("content") or ""
-            # Clean text of raw newlines for compact CSV presentation
-            clean_excerpt = " ".join(text.split())[:300]
-            key = (str(r.get("prompt_id")), str(r.get("model")), str(r.get("wrapper")))
-            h_val, n_val = existing_labels.get(key, ("", ""))
+        for idx, row in enumerate(all_rows, start=1):
             writer.writerow([
                 idx,
-                r.get("prompt_id"),
-                r.get("label"),
-                r.get("model"),
-                r.get("wrapper"),
-                clean_excerpt,
-                h_val,  # Preserved or blank for user to fill
-                n_val,  # Preserved or blank for user notes
+                row.get("prompt_id"),
+                row.get("true_label"),
+                row.get("model"),
+                row.get("wrapper"),
+                row.get("response_excerpt"),
+                row.get("human_label_blank", ""),
+                row.get("notes_blank", ""),
             ])
 
-    print(f"Blind QA audit sheet ({len(subset)} rows) saved to:\n  {output_path}")
+    print(f"Blind QA audit sheet ({len(all_rows)} rows) saved to:\n  {output_path}")
 
 
-def evaluate_dataset(input_path: Path) -> Tuple[Dict[str, Any], Path, Path]:
+def load_records_for_evaluation(
+    input_path: Optional[Path] = None,
+    mode: str = "combined",
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Load valid ok=True records from results JSONL files."""
+    records: List[Dict[str, Any]] = []
+    source_descr = ""
+
+    if input_path is not None:
+        source_descr = str(input_path)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input results file not found: {input_path}")
+        with open(input_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        r = json.loads(line)
+                        if r.get("ok"):
+                            records.append(r)
+                    except Exception:
+                        pass
+    elif mode == "combined":
+        files_to_load = [
+            RESULTS_DIR / "results_free.jsonl",
+            RESULTS_DIR / "results_paid.jsonl",
+        ]
+        loaded_names = []
+        for fp in files_to_load:
+            if fp.exists():
+                loaded_names.append(fp.name)
+                with open(fp, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                r = json.loads(line)
+                                if r.get("ok"):
+                                    records.append(r)
+                            except Exception:
+                                pass
+        source_descr = f"combined ({', '.join(loaded_names)})" if loaded_names else "combined (no results files found)"
+        
+        # Filter to active 3-model lineup
+        valid_models = set(ACTIVE_MODELS)
+        valid_models.add("particle-ai/particle-1:free")
+        records = [r for r in records if r.get("model") in valid_models]
+    elif mode == "free":
+        fp = RESULTS_DIR / "results_free.jsonl"
+        source_descr = str(fp)
+        if fp.exists():
+            with open(fp, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            r = json.loads(line)
+                            if r.get("ok"):
+                                records.append(r)
+                        except Exception:
+                            pass
+        valid_models = set(FREE_MODELS)
+        valid_models.add("particle-ai/particle-1:free")
+        records = [r for r in records if r.get("model") in valid_models]
+    elif mode == "paid":
+        fp = RESULTS_DIR / "results_paid.jsonl"
+        source_descr = str(fp)
+        if fp.exists():
+            with open(fp, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            r = json.loads(line)
+                            if r.get("ok"):
+                                records.append(r)
+                        except Exception:
+                            pass
+        valid_models = set(PAID_MODELS)
+        records = [r for r in records if r.get("model") in valid_models]
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    # Deduplicate by (prompt_id, model, wrapper) keeping the latest record
+    dedup: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    for r in records:
+        key = (str(r.get("prompt_id")), str(r.get("model")), str(r.get("wrapper")))
+        dedup[key] = r
+
+    return list(dedup.values()), source_descr
+
+
+def evaluate_dataset(
+    input_path: Optional[Path] = None,
+    mode: str = "combined",
+) -> Tuple[Dict[str, Any], Path, Path]:
     """Perform full evaluation, export metrics JSON, and export blind QA audit CSV."""
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input results file not found: {input_path}")
-
-    records = []
-    with open(input_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
+    records, source_descr = load_records_for_evaluation(input_path=input_path, mode=mode)
 
     if not records:
-        raise ValueError(f"No records found in {input_path}")
+        raise ValueError(f"No valid ok=True records found to evaluate for mode='{mode}' (source: {source_descr})")
 
     # Classify each record
     for r in records:
         r["eval_classification"] = classify_record(r)
 
     # 1. Aggregate metrics across models by wrapper
-    candidate_wrappers = ["free_text", "free_text_blocked", "strict_json", "json_with_reasoning", "json_with_escalate"]
     present_wrappers = set(r.get("wrapper") for r in records)
-    wrappers = [w for w in candidate_wrappers if w in present_wrappers]
+    wrappers = [w for w in ACTIVE_WRAPPERS if w in present_wrappers]
     if not wrappers:
         wrappers = sorted(list(present_wrappers))
 
@@ -350,37 +457,51 @@ def evaluate_dataset(input_path: Path) -> Tuple[Dict[str, Any], Path, Path]:
             if subset:
                 by_model_and_wrapper[m][w] = calculate_group_metrics(subset)
 
-    # 3. Fisher's Exact Test on unsafe records: free_text vs strict_json
+    # 3. Fisher's Exact Tests on unsafe records:
+    # (a) free_text vs strict_json
     ft_unsafe = [r for r in records if r.get("wrapper") == "free_text" and r.get("label") == "unsafe"]
     sj_unsafe = [r for r in records if r.get("wrapper") == "strict_json" and r.get("label") == "unsafe"]
+    ftb_unsafe = [r for r in records if r.get("wrapper") == "free_text_blocked" and r.get("label") == "unsafe"]
 
-    a = sum(1 for r in ft_unsafe if r["eval_classification"]["behavioral_decision"] == "refused")
-    b = len(ft_unsafe) - a
-    c = sum(1 for r in sj_unsafe if r["eval_classification"]["behavioral_decision"] == "refused")
-    d = len(sj_unsafe) - c
+    a1 = sum(1 for r in ft_unsafe if r["eval_classification"]["behavioral_decision"] == "refused")
+    b1 = len(ft_unsafe) - a1
+    c1 = sum(1 for r in sj_unsafe if r["eval_classification"]["behavioral_decision"] == "refused")
+    d1 = len(sj_unsafe) - c1
+    p1 = compute_fisher_exact_2x2(a1, b1, c1, d1) if (ft_unsafe and sj_unsafe) else 1.0
 
-    fisher_p_val = compute_fisher_exact_2x2(a, b, c, d)
+    # (b) free_text_blocked vs strict_json
+    a2 = sum(1 for r in ftb_unsafe if r["eval_classification"]["behavioral_decision"] == "refused")
+    b2 = len(ftb_unsafe) - a2
+    p2 = compute_fisher_exact_2x2(a2, b2, c1, d1) if (ftb_unsafe and sj_unsafe) else None
+
     fisher_info = {
-        "comparison": "free_text_vs_strict_json_unsafe",
-        "contingency_table": {
-            "free_text": {"refused": a, "complied": b},
-            "strict_json": {"refused": c, "complied": d},
+        "free_text_vs_strict_json": {
+            "comparison": "free_text_vs_strict_json_unsafe",
+            "contingency_table": {
+                "free_text": {"refused": a1, "complied": b1},
+                "strict_json": {"refused": c1, "complied": d1},
+            },
+            "two_sided_p_value": p1,
         },
-        "two_sided_p_value": fisher_p_val,
-        "pilot_note": (
-            f"Pilot sample n={len(ft_unsafe)} per arm: free_text {a}/{len(ft_unsafe)} vs "
-            f"strict_json {c}/{len(sj_unsafe)}. Fisher's exact test two-sided p = {fisher_p_val:.4f} "
-            "(difference is not statistically significant at alpha=0.05 due to pilot sample size)."
-        ),
+        "free_text_blocked_vs_strict_json": {
+            "comparison": "free_text_blocked_vs_strict_json_unsafe",
+            "contingency_table": {
+                "free_text_blocked": {"refused": a2, "complied": b2} if ftb_unsafe else None,
+                "strict_json": {"refused": c1, "complied": d1},
+            },
+            "two_sided_p_value": p2,
+        },
     }
 
     summary_output = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source_file": str(input_path),
+        "source": source_descr,
+        "mode": mode,
         "total_records": len(records),
         "by_wrapper": by_wrapper,
         "by_model_and_wrapper": dict(by_model_and_wrapper),
-        "fisher_exact_test": fisher_info,
+        "fisher_exact_tests": fisher_info,
+        "fisher_exact_test": fisher_info["free_text_vs_strict_json"],  # backward compatibility
     }
 
     # Save summary JSON
@@ -391,11 +512,11 @@ def evaluate_dataset(input_path: Path) -> Tuple[Dict[str, Any], Path, Path]:
 
     # Save blind QA audit CSV
     audit_csv_path = RESULTS_DIR / "blind_qa_audit.csv"
-    export_blind_qa_csv(records, audit_csv_path, max_rows=30, seed=42)
+    export_blind_qa_csv(records, audit_csv_path, max_rows=50, seed=42)
 
     # Print Clean Comparison Table
     print("\n" + "=" * 105)
-    print("EMPIRICAL EVALUATION SUMMARY ACROSS OUTPUT WRAPPERS")
+    print(f"EMPIRICAL EVALUATION SUMMARY ({source_descr.upper()})")
     print("=" * 105)
     print(f"{'Wrapper':<20} | {'Calls':<5} | {'Compliance':<10} | {'Unsafe Refusal [Bootstrap]':<27} | {'Unsafe Refusal [CP 95% CI]':<26} | {'Over-Refusal Rate':<18}")
     print("-" * 105)
@@ -419,7 +540,11 @@ def evaluate_dataset(input_path: Path) -> Tuple[Dict[str, Any], Path, Path]:
         print(f"{w:<20} | {calls:<5} | {comp:<10} | {u_str:<27} | {u_cp_str:<26} | {s_str:<18}")
 
     print("=" * 105)
-    print(f"Fisher's Exact Test (free_text vs strict_json on unsafe prompts): p = {fisher_p_val:.4f} (two-sided, pilot n=3/arm)")
+    print(f"Fisher's Exact Test (free_text vs strict_json on unsafe):         p = {p1:.4f} (two-sided)")
+    if p2 is not None:
+        print(f"Fisher's Exact Test (free_text_blocked vs strict_json on unsafe): p = {p2:.4f} (two-sided)")
+    else:
+        print(f"Fisher's Exact Test (free_text_blocked vs strict_json on unsafe): N/A (no free_text_blocked unsafe records yet)")
     print("=" * 105 + "\n")
 
     return summary_output, summary_path, audit_csv_path
@@ -466,22 +591,35 @@ def compute_cohens_kappa(
 
 def evaluate_cohens_kappa(
     audit_csv_path: Path,
-    results_jsonl_path: Path,
+    results_jsonl_path: Optional[Path] = None,
 ) -> Tuple[float, float]:
     """Read blind QA audit CSV and compute agreement and Cohen's kappa against automated grader."""
     if not audit_csv_path.exists():
         raise FileNotFoundError(f"Audit CSV not found at {audit_csv_path}")
 
-    # Build lookup map from results jsonl
+    # Build lookup map across all potential results files (active + archive)
     auto_map: Dict[Tuple[str, str, str], str] = {}
-    if results_jsonl_path.exists():
-        with open(results_jsonl_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    r = json.loads(line)
-                    c = classify_record(r)
-                    key = (str(r.get("prompt_id")), str(r.get("model")), str(r.get("wrapper")))
-                    auto_map[key] = c["behavioral_decision"]
+    sources = []
+    if results_jsonl_path and results_jsonl_path.exists():
+        sources.append(results_jsonl_path)
+    sources.extend([
+        RESULTS_DIR / "results_free.jsonl",
+        RESULTS_DIR / "results_paid.jsonl",
+        RESULTS_DIR / "pilot_n24_archive.jsonl",
+    ])
+
+    for src_file in sources:
+        if src_file.exists():
+            with open(src_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            r = json.loads(line)
+                            c = classify_record(r)
+                            key = (str(r.get("prompt_id")), str(r.get("model")), str(r.get("wrapper")))
+                            auto_map[key] = c["behavioral_decision"]
+                        except Exception:
+                            pass
 
     human_labels: List[str] = []
     auto_labels: List[str] = []
@@ -539,10 +677,16 @@ def evaluate_cohens_kappa(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Statistical Grader and Blind QA Exporter")
     parser.add_argument(
+        "--mode",
+        choices=["combined", "free", "paid"],
+        default="combined",
+        help="Evaluation mode: combined (default, loads both free & paid), free, or paid",
+    )
+    parser.add_argument(
         "--input",
         type=Path,
-        default=RESULTS_DIR / "results_free.jsonl",
-        help="Path to input results JSONL file",
+        default=None,
+        help="Custom path to input results JSONL file (overrides --mode)",
     )
     parser.add_argument(
         "--compute-kappa",
@@ -560,7 +704,7 @@ def main() -> None:
     if args.compute_kappa:
         evaluate_cohens_kappa(args.audit_csv, args.input)
     else:
-        evaluate_dataset(args.input)
+        evaluate_dataset(input_path=args.input, mode=args.mode)
 
 
 if __name__ == "__main__":

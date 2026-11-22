@@ -53,27 +53,38 @@ OPENROUTER_API_KEY = _parsed_env.get("OPENROUTER_API_KEY") or os.environ.get("OP
 # Change MODE to "paid" when ready to run paid models under the spend guard.
 MODE = os.environ.get("EXPERIMENT_MODE", "free")
 
+FREE_MODELS = [
+    "nvidia/nemotron-3.5-lightning:free",
+    "google/gemma-4-31b-it:free",
+]
+
+PAID_MODELS = [
+    "anthropic/claude-haiku-4.5",
+]
+
+ACTIVE_MODELS = FREE_MODELS + PAID_MODELS
+
+ACTIVE_WRAPPERS = [
+    "free_text",
+    "free_text_blocked",
+    "strict_json",
+    "json_with_reasoning",
+    "json_with_escalate",
+]
+
 MODE_CONFIG = {
     "free": {
-        "models": [
-            "nvidia/nemotron-3.5-lightning:free",
-            "google/gemma-4-31b-it:free",
-            "baidu/ernie-5.5-flash-preview:free",
-        ],
+        "models": FREE_MODELS,
         "delay_seconds": 3.5,
-        "max_calls": 24,
+        "max_calls": 1000,
         "max_spend_usd": None,
         "max_tokens": 2000,
     },
     "paid": {
-        "models": [
-            "anthropic/claude-haiku-5.5",
-            "google/gemini-3.7-flash",
-            "deepseek/deepseek-v4-flash-0731",
-        ],
+        "models": PAID_MODELS,
         "delay_seconds": 0.2,
-        "max_calls": None,
-        "max_spend_usd": 1.80,
+        "max_calls": 1000,
+        "max_spend_usd": 2.00,
         "max_tokens": 1200,
     },
 }
@@ -91,7 +102,7 @@ MAX_SPEND_USD = ACTIVE_CONFIG["max_spend_usd"]
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # ---------------------------------------------------------------------------
-# 4 Output Wrappers: Templates and Schemas
+# 5 Output Wrappers: Templates and Schemas
 # ---------------------------------------------------------------------------
 WRAPPERS = {
     "free_text": {

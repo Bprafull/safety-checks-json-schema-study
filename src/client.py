@@ -99,16 +99,7 @@ class OpenRouterClient:
 
         for model in self.configured_models:
             if model in available_ids:
-                # If gemma is in free mode, note upstream provider throttling and map to responsive fallback
-                if self.mode == "free" and "gemma" in model.lower():
-                    fallback = "particle-ai/particle-1:free"
-                    print(
-                        f"[OpenRouterClient] Note: '{model}' has known upstream provider 429 throttling. "
-                        f"Auto-falling back to active free model: '{fallback}'"
-                    )
-                    self.model_map[model] = fallback
-                else:
-                    self.model_map[model] = model
+                self.model_map[model] = model
             else:
                 # In free mode, find a fallback free model
                 if self.mode == "free":
@@ -137,13 +128,12 @@ class OpenRouterClient:
 
     def _enforce_guards(self) -> None:
         """Enforce call limits, spend caps, and minimum inter-call delay."""
-        # 1. Free mode max_calls safety cap
-        if self.mode == "free" and self.max_calls is not None:
-            if self.total_calls >= self.max_calls:
-                raise RuntimeError(
-                    f"[Safety Guard] Hard limit of {self.max_calls} total calls reached for this run. "
-                    "Aborting to protect free tier quota."
-                )
+        # 1. max_calls safety cap
+        if self.max_calls is not None and self.total_calls >= self.max_calls:
+            raise RuntimeError(
+                f"[Safety Guard] Hard limit of {self.max_calls} total calls reached for this run. "
+                "Aborting to protect call quota."
+            )
 
         # 2. Paid mode max_spend_usd guard
         if self.mode == "paid" and self.max_spend_usd is not None:

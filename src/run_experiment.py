@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.client import OpenRouterClient
 from src.config import (
+    ACTIVE_WRAPPERS,
     MODE,
     RESULTS_DIR,
     SAMPLE_DATA_PATH,
@@ -128,6 +129,7 @@ def run_experiment(
     output_path: Optional[Path] = None,
     dry_run: bool = False,
     wrappers: Optional[List[str]] = None,
+    max_calls: Optional[int] = None,
 ) -> Path:
     """Run experiment across prompts, models, and wrappers with checkpointing."""
     if dry_run:
@@ -153,13 +155,13 @@ def run_experiment(
 
     prompts_to_run = all_prompts[:limit]
 
-    # Initialize client
-    client = OpenRouterClient(mode=mode)
+    # Initialize client with optional max_calls
+    client = OpenRouterClient(mode=mode, max_calls=max_calls)
     resolved_models = client.configured_models
     models_to_run = resolved_models[:models_limit] if models_limit else resolved_models
     
     if wrappers is None:
-        wrapper_keys = ["free_text", "strict_json", "json_with_reasoning", "json_with_escalate"]
+        wrapper_keys = ACTIVE_WRAPPERS
     else:
         wrapper_keys = wrappers
 
@@ -193,8 +195,16 @@ def run_experiment(
         p_focus = prompt_item.get("focus", "")
         p_text = prompt_item["prompt"]
 
+        stop_experiment = False
         for model in models_to_run:
+            if stop_experiment:
+                break
             for wrapper_name in wrapper_keys:
+                if max_calls is not None and session_calls >= max_calls:
+                    print(f"\n[Runner] Reached max-calls limit ({max_calls}). Stopping run.")
+                    stop_experiment = True
+                    break
+
                 call_index += 1
                 lookup_key = (p_id, model, wrapper_name)
 
@@ -241,48 +251,57 @@ def run_experiment(
                     reasoning=resp.get("reasoning", ""),
                 )
 
-                if wrapper_name != "free_text":
+                if wrapper_name not in ("free_text", "free_text_blocked"):
                     json_total_count += 1
                     if json_valid:
                         json_valid_count += 1
 
-                # Build record
-                record = {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "mode": mode,
-                    "prompt_id": p_id,
-                    "label": p_label,
-                    "category": p_cat,
-                    "focus": p_focus,
-                    "model": model,
-                    "wrapper": wrapper_name,
-                    "ok": resp["ok"],
-                    "content": resp.get("content", ""),
-                    "reasoning": resp.get("reasoning", ""),
-                    "parsed_json": parsed_json,
-                    "json_valid": json_valid,
-                    "declared_status": declared_status,
-                    "response_text": response_text,
-                    "cost_usd": resp.get("cost_usd", 0.0),
-                    "latency_ms": resp.get("latency_ms", 0.0),
-                    "error": resp.get("error"),
-                }
+                if resp["ok"]:
+                    # Build and stream successful record immediately line-by-line
+                    record = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "mode": mode,
+                        "prompt_id": p_id,
+                        "label": p_label,
+                        "category": p_cat,
+                        "focus": p_focus,
+                        "model": model,
+                        "wrapper": wrapper_name,
+                        "ok": True,
+                        "content": resp.get("content", ""),
+                        "reasoning": resp.get("reasoning", ""),
+                        "parsed_json": parsed_json,
+                        "json_valid": json_valid,
+                        "declared_status": declared_status,
+                        "response_text": response_text,
+                        "cost_usd": resp.get("cost_usd", 0.0),
+                        "latency_ms": resp.get("latency_ms", 0.0),
+                        "error": None,
+                    }
 
-                # Stream immediately line-by-line
-                with open(output_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    f.flush()
+                    with open(output_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        f.flush()
 
-                completed_keys.add(lookup_key)
+                    completed_keys.add(lookup_key)
 
-                # Progress output
-                status_disp = f"Status: {declared_status}" if declared_status else "Status: -"
-                json_disp = f"JSON: {'Valid' if json_valid else 'Invalid'}" if wrapper_name != "free_text" else "Plain"
-                print(
-                    f"[{call_index}/{total_planned}] ID #{p_id} ({p_label.upper()}) | "
-                    f"{model} | {wrapper_name} | OK: {resp['ok']} | {json_disp} | {status_disp} | "
-                    f"Latency: {resp['latency_ms']}ms"
-                )
+                    # Progress output
+                    status_disp = f"Status: {declared_status}" if declared_status else "Status: -"
+                    json_disp = f"JSON: {'Valid' if json_valid else 'Invalid'}" if wrapper_name not in ("free_text", "free_text_blocked") else "Plain"
+                    print(
+                        f"[{call_index}/{total_planned}] ID #{p_id} ({p_label.upper()}) | "
+                        f"{model} | {wrapper_name} | OK: True | {json_disp} | {status_disp} | "
+                        f"Latency: {resp['latency_ms']}ms"
+                    )
+                else:
+                    # NEVER cache ok: false into .jsonl
+                    print(
+                        f"[{call_index}/{total_planned}] (FAILED) ID #{p_id} ({p_label.upper()}) | "
+                        f"{model} | {wrapper_name} | Error: {resp.get('error')}. Skipping cache."
+                    )
+
+        if stop_experiment:
+            break
 
     print("\n" + "=" * 70)
     print("EXPERIMENT RUN SUMMARY")
@@ -306,6 +325,7 @@ def main() -> None:
     parser.add_argument("--mode", choices=["free", "paid"], default=MODE, help="Execution mode (free or paid)")
     parser.add_argument("--limit", type=int, default=None, help="Number of prompts to evaluate")
     parser.add_argument("--models-limit", type=int, default=None, help="Number of models to evaluate")
+    parser.add_argument("--max-calls", type=int, default=None, help="Maximum number of new API calls to make")
     parser.add_argument("--dry-run", action="store_true", help="Shortcut for 8-call dry run (--limit 2 --models-limit 1)")
     parser.add_argument("--output", type=Path, default=None, help="Custom output .jsonl path")
     parser.add_argument("--include-free-text-blocked", action="store_true", help="Include 5th wrapper 'free_text_blocked'")
@@ -314,7 +334,7 @@ def main() -> None:
 
     wrappers = args.wrappers
     if wrappers is None and args.include_free_text_blocked:
-        wrappers = ["free_text", "free_text_blocked", "strict_json", "json_with_reasoning", "json_with_escalate"]
+        wrappers = ACTIVE_WRAPPERS
 
     run_experiment(
         mode=args.mode,
@@ -323,6 +343,7 @@ def main() -> None:
         output_path=args.output,
         dry_run=args.dry_run,
         wrappers=wrappers,
+        max_calls=args.max_calls,
     )
 
 
