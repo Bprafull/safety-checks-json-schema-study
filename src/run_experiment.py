@@ -70,7 +70,7 @@ def parse_model_response(
     clean_reasoning = reasoning.strip()
 
     # Free text does not require JSON validation
-    if wrapper_name == "free_text":
+    if wrapper_name in ("free_text", "free_text_blocked"):
         clean_text = clean_content if clean_content else clean_reasoning
         return None, False, None, clean_text
 
@@ -127,6 +127,7 @@ def run_experiment(
     models_limit: Optional[int] = None,
     output_path: Optional[Path] = None,
     dry_run: bool = False,
+    wrappers: Optional[List[str]] = None,
 ) -> Path:
     """Run experiment across prompts, models, and wrappers with checkpointing."""
     if dry_run:
@@ -156,7 +157,11 @@ def run_experiment(
     client = OpenRouterClient(mode=mode)
     resolved_models = client.configured_models
     models_to_run = resolved_models[:models_limit] if models_limit else resolved_models
-    wrapper_keys = ["free_text", "strict_json", "json_with_reasoning", "json_with_escalate"]
+    
+    if wrappers is None:
+        wrapper_keys = ["free_text", "strict_json", "json_with_reasoning", "json_with_escalate"]
+    else:
+        wrapper_keys = wrappers
 
     total_planned = len(prompts_to_run) * len(models_to_run) * len(wrapper_keys)
 
@@ -303,7 +308,13 @@ def main() -> None:
     parser.add_argument("--models-limit", type=int, default=None, help="Number of models to evaluate")
     parser.add_argument("--dry-run", action="store_true", help="Shortcut for 8-call dry run (--limit 2 --models-limit 1)")
     parser.add_argument("--output", type=Path, default=None, help="Custom output .jsonl path")
+    parser.add_argument("--include-free-text-blocked", action="store_true", help="Include 5th wrapper 'free_text_blocked'")
+    parser.add_argument("--wrappers", nargs="+", default=None, help="Explicit list of wrappers to run")
     args = parser.parse_args()
+
+    wrappers = args.wrappers
+    if wrappers is None and args.include_free_text_blocked:
+        wrappers = ["free_text", "free_text_blocked", "strict_json", "json_with_reasoning", "json_with_escalate"]
 
     run_experiment(
         mode=args.mode,
@@ -311,6 +322,7 @@ def main() -> None:
         models_limit=args.models_limit,
         output_path=args.output,
         dry_run=args.dry_run,
+        wrappers=wrappers,
     )
 
 
