@@ -398,16 +398,16 @@ def plot_figure_3(
             ax2.text(c_pct + (r_pct / 2), idx, f"{r_pct:.0f}%", ha="center", va="center", color="white", fontweight="bold", fontsize=8.5)
 
     ax2.set_xlabel("Proportion of Outcomes (%)")
-    ax2.set_title("Panel B: Behavioral Outcome Breakdown (100% Stacked)", pad=28)
+    ax2.set_title("Panel B: Behavioral Outcome Breakdown (100% Stacked)", pad=36)
     ax2.set_yticks(list(y_pos))
     ax2.set_yticklabels([WRAPPER_LABELS[w].replace("\n", " ") for w in wrappers])
     ax2.set_xlim(0, 100)
     ax2.grid(True, linestyle="--", alpha=0.4, axis="x")
 
-    # Legend placed horizontally above the bars
+    # Legend placed horizontally above the bars with ample title clearance
     ax2.legend(
         loc="upper center",
-        bbox_to_anchor=(0.5, 1.15),
+        bbox_to_anchor=(0.5, 1.12),
         ncol=4,
         frameon=True,
         facecolor="#FAFAFA",
@@ -416,7 +416,7 @@ def plot_figure_3(
     )
 
     fig.suptitle("Figure 3: Computational Latency and Outcome Distributions Across Schema Formats", y=0.98, fontsize=13)
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    plt.tight_layout(rect=[0, 0, 1, 0.90])
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
     print(f"Generated Figure 3 -> {output_path}")
@@ -518,14 +518,14 @@ def plot_figure_4(
             )
 
     ax1.set_ylabel("Percentage (%)")
-    ax1.set_title("Panel A: Model Safety & Compliance Comparison", pad=28)
+    ax1.set_title("Panel A: Model Safety & Compliance Comparison", pad=36)
     ax1.set_xticks(list(x))
     ax1.set_xticklabels(clean_model_names)
     ax1.set_ylim(0, 125)
     ax1.grid(True, linestyle="--", alpha=0.4, axis="y")
     ax1.legend(
         loc="upper center",
-        bbox_to_anchor=(0.5, 1.15),
+        bbox_to_anchor=(0.5, 1.12),
         ncol=2,
         frameon=True,
         facecolor="#FAFAFA",
@@ -563,7 +563,7 @@ def plot_figure_4(
         )
 
     fig.suptitle("Figure 4: Direct Cross-Model Safety, Schema Compliance & Latency Comparison", y=0.98, fontsize=13)
-    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    plt.tight_layout(rect=[0, 0, 1, 0.90])
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
     print(f"Generated Figure 4 -> {output_path}")
@@ -576,7 +576,7 @@ def plot_figure_5(output_path: Path) -> None:
     """Figure 5: Horizontal 5-stage system architecture diagram drawn with FancyBboxPatch."""
     set_academic_style()
     fig, ax = plt.subplots(figsize=(13.0, 4.2), dpi=300)
-    ax.set_xlim(0, 100)
+    ax.set_xlim(-0.5, 102.5)
     ax.set_ylim(0, 30)
     ax.axis("off")
 
